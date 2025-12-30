@@ -1,0 +1,15 @@
+/build/
+/.gradle/
+*.log
+*.iml
+/.idea/
+/out/
+/lib/*.jar
+/init/
+*.yml
+.vscode/
+.DS_Store
+/node_modules/
+/dist/
+.env
+

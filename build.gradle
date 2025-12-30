@@ -1,0 +1,30 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.j0lt'
+version = '1.0.0'
+
+tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    compileOnly 'net.portswigger.burp.extender:burp-extender-api:2.3'
+}
+
+jar {
+    archiveBaseName = 'mongobleed-burp'
+    manifest {
+        attributes 'Main-Class': 'com.j0lt.mongobleed.BurpExtender'
+    }
+}
