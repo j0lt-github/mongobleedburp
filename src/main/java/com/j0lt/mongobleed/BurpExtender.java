@@ -11,7 +11,7 @@ public class BurpExtender implements IBurpExtender, ITab {
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
-        callbacks.setExtensionName("MongoBleed Detector (j0lt)");
+        callbacks.setExtensionName("MongoBleed Detector");
         tab = new MongobleedTab(callbacks);
         callbacks.addSuiteTab(this);
         callbacks.printOutput("MongoBleed extension loaded: creator j0lt");
