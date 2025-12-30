@@ -1,4 +1,4 @@
-# MongoBleed Burp Extension (j0lt)
+# MongoBleed Burp Extension
 
 Burp Suite extension to detect CVE-2025-14847 (MongoBleed) via manual leak tests from a dedicated UI tab.
 
