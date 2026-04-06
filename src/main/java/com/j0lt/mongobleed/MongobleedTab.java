@@ -30,10 +30,21 @@ import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import javax.swing.JFileChooser;
 
 public class MongobleedTab {
     private final IBurpExtenderCallbacks callbacks;
@@ -59,6 +70,7 @@ public class MongobleedTab {
     private JButton stopButton;
     private JButton clearButton;
     private JButton copyButton;
+    private JButton downloadButton;
 
     private JLabel statusLabel;
     private JLabel summaryLabel;
@@ -72,6 +84,8 @@ public class MongobleedTab {
     private JTextField filterField;
 
     private final AtomicReference<ScanWorker> currentWorker = new AtomicReference<>();
+    private final AtomicReference<TempLeakStore> leakStore = new AtomicReference<>();
+    private final AtomicInteger readErrorCount = new AtomicInteger(0);
 
     public MongobleedTab(IBurpExtenderCallbacks callbacks) {
         this.callbacks = callbacks;
@@ -87,6 +101,16 @@ public class MongobleedTab {
 
     public Component getRoot() {
         return root;
+    }
+
+    public void shutdown() {
+        ScanWorker worker = currentWorker.getAndSet(null);
+        if (worker != null) {
+            worker.requestStop();
+            worker.cancel(true);
+        }
+        scanner.cancelInFlight();
+        clearLeakStore();
     }
 
     private JComponent buildManualPanel() {
@@ -159,17 +183,22 @@ public class MongobleedTab {
         stopButton = new JButton("Stop");
         clearButton = new JButton("Clear");
         copyButton = new JButton("Copy Selected");
+        downloadButton = new JButton("Download Output");
         stopButton.setEnabled(false);
+        copyButton.setEnabled(false);
+        downloadButton.setEnabled(false);
 
         runButton.addActionListener(e -> startScan());
         stopButton.addActionListener(e -> stopScan());
         clearButton.addActionListener(e -> clearResults());
         copyButton.addActionListener(e -> copySelected());
+        downloadButton.addActionListener(e -> downloadOutput());
 
         panel.add(runButton);
         panel.add(stopButton);
         panel.add(clearButton);
         panel.add(copyButton);
+        panel.add(downloadButton);
 
         return panel;
     }
@@ -259,8 +288,9 @@ public class MongobleedTab {
                 "Creator: j0lt\n\n" +
                 "Repository: https://github.com/j0lt-github/mongobleedburp\n\n" +
                 "The extension performs a zlib-compressed OP_MSG probe that can expose " +
-                "uninitialized memory in vulnerable MongoDB versions. Leaks are kept in " +
-                "memory only and displayed in the UI. Use only for authorized security testing."
+                "uninitialized memory in vulnerable MongoDB versions. Leak bytes are written " +
+                "to a rotating temporary file and displayed in the UI. Use only for authorized " +
+                "security testing."
         );
         return new JScrollPane(about);
     }
@@ -277,7 +307,17 @@ public class MongobleedTab {
             return;
         }
 
-        clearResults();
+        TempLeakStore store;
+        try {
+            store = rotateLeakStore();
+        } catch (IOException e) {
+            logError("Failed to prepare temporary leak file", e);
+            JOptionPane.showMessageDialog(root, "Could not create temporary output file", "Storage Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        clearResults(false);
+        readErrorCount.set(0);
 
         int estimatedProbes = estimateProbes(config);
         progressBar.setMinimum(0);
@@ -287,9 +327,12 @@ public class MongobleedTab {
 
         runButton.setEnabled(false);
         stopButton.setEnabled(true);
+        clearButton.setEnabled(false);
+        copyButton.setEnabled(false);
+        downloadButton.setEnabled(false);
         statusLabel.setText("Running scan...");
 
-        ScanWorker worker = new ScanWorker(config);
+        ScanWorker worker = new ScanWorker(config, store);
         currentWorker.set(worker);
         worker.execute();
     }
@@ -298,11 +341,16 @@ public class MongobleedTab {
         ScanWorker worker = currentWorker.get();
         if (worker != null) {
             worker.requestStop();
+            scanner.cancelInFlight();
             statusLabel.setText("Stopping...");
         }
     }
 
     private void clearResults() {
+        clearResults(true);
+    }
+
+    private void clearResults(boolean clearStore) {
         tableModel.setLeaks(new ArrayList<LeakItem>());
         hexArea.setText("");
         textArea.setText("");
@@ -311,6 +359,11 @@ public class MongobleedTab {
         statusLabel.setText("Ready");
         progressBar.setValue(0);
         progressBar.setString("0 / 0");
+        copyButton.setEnabled(false);
+        downloadButton.setEnabled(false);
+        if (clearStore) {
+            clearLeakStore();
+        }
     }
 
     private void copySelected() {
@@ -320,9 +373,87 @@ public class MongobleedTab {
         }
         int modelRow = leakTable.convertRowIndexToModel(row);
         LeakItem item = tableModel.getLeakAt(modelRow);
-        String dump = FormatUtils.hexAsciiDump(item.getData(), 16);
+        byte[] data = readLeakBytes(item, true);
+        if (data == null) {
+            return;
+        }
+        String dump = FormatUtils.hexAsciiDump(data, 16);
         Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(dump), null);
         statusLabel.setText("Copied selected leak");
+    }
+
+    private void downloadOutput() {
+        if (tableModel.getRowCount() == 0) {
+            JOptionPane.showMessageDialog(root, "No output available to export.", "No Output", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Save MongoBleed Output");
+        chooser.setSelectedFile(new File("mongobleed-output.txt"));
+
+        int choice = chooser.showSaveDialog(root);
+        if (choice != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+
+        File destination = chooser.getSelectedFile();
+        if (destination == null) {
+            return;
+        }
+
+        List<LeakItem> leaks = tableModel.getLeaks();
+        try (BufferedWriter writer = Files.newBufferedWriter(destination.toPath(), StandardCharsets.UTF_8)) {
+            writer.write("MongoBleed Detector Output");
+            writer.newLine();
+            writer.write("Target: " + hostField.getText().trim() + ":" + portField.getText().trim());
+            writer.newLine();
+            writer.write("Offsets: " + minOffsetField.getText().trim() + "-" + maxOffsetField.getText().trim());
+            writer.newLine();
+            writer.write("Fragments: " + leaks.size());
+            writer.newLine();
+            writer.newLine();
+
+            for (int i = 0; i < leaks.size(); i++) {
+                LeakItem leak = leaks.get(i);
+                byte[] data = readLeakBytes(leak, false);
+                if (data == null) {
+                    continue;
+                }
+                writer.write(String.format(Locale.ROOT, "Leak #%d", i + 1));
+                writer.newLine();
+                writer.write("Offset: " + leak.getOffset());
+                writer.newLine();
+                writer.write("Length: " + leak.getLength());
+                writer.newLine();
+                writer.write("Preview: " + leak.getPreview());
+                writer.newLine();
+                writer.write("Text:");
+                writer.newLine();
+                writer.write(FormatUtils.safeUtf8(data));
+                writer.newLine();
+                writer.write("Hex:");
+                writer.newLine();
+                writer.write(FormatUtils.hexAsciiDump(data, 16));
+                writer.newLine();
+            }
+        } catch (IOException e) {
+            logError("Failed to export output file", e);
+            JOptionPane.showMessageDialog(root, "Could not export output file.", "Export Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        int failures = readErrorCount.get();
+        if (failures > 0) {
+            statusLabel.setText("Exported with " + failures + " read failures");
+            JOptionPane.showMessageDialog(
+                    root,
+                    "Export completed with " + failures + " leak record read failures. Check Burp extension errors for details.",
+                    "Partial Export",
+                    JOptionPane.WARNING_MESSAGE
+            );
+        } else {
+            statusLabel.setText("Exported output to " + destination.getName());
+        }
     }
 
     private void updateDetails() {
@@ -334,8 +465,55 @@ public class MongobleedTab {
         }
         int modelRow = leakTable.convertRowIndexToModel(row);
         LeakItem item = tableModel.getLeakAt(modelRow);
-        hexArea.setText(FormatUtils.hexAsciiDump(item.getData(), 16));
-        textArea.setText(FormatUtils.safeUtf8(item.getData()));
+        byte[] data = readLeakBytes(item, true);
+        if (data == null) {
+            hexArea.setText("");
+            textArea.setText("");
+            return;
+        }
+        hexArea.setText(FormatUtils.hexAsciiDump(data, 16));
+        textArea.setText(FormatUtils.safeUtf8(data));
+    }
+
+    private byte[] readLeakBytes(LeakItem item, boolean showDialogOnFailure) {
+        if (item == null || item.getRecordOffset() < 0) {
+            return null;
+        }
+        TempLeakStore store = leakStore.get();
+        if (store == null) {
+            return null;
+        }
+        try {
+            return store.read(item.getRecordOffset());
+        } catch (IOException e) {
+            readErrorCount.incrementAndGet();
+            logError("Failed to read leak record from temporary file", e);
+            if (showDialogOnFailure) {
+                JOptionPane.showMessageDialog(
+                        root,
+                        "Failed to read leak bytes from temporary storage. Check Burp extension errors for details.",
+                        "Read Error",
+                        JOptionPane.ERROR_MESSAGE
+                );
+            }
+            return null;
+        }
+    }
+
+    private TempLeakStore rotateLeakStore() throws IOException {
+        TempLeakStore next = TempLeakStore.create();
+        TempLeakStore previous = leakStore.getAndSet(next);
+        if (previous != null) {
+            previous.deleteQuietly();
+        }
+        return next;
+    }
+
+    private void clearLeakStore() {
+        TempLeakStore previous = leakStore.getAndSet(null);
+        if (previous != null) {
+            previous.deleteQuietly();
+        }
     }
 
     private void applyFilter(TableRowSorter<LeakTableModel> sorter) {
@@ -431,17 +609,38 @@ public class MongobleedTab {
         gbc.gridy++;
     }
 
+    private void logError(String message, Throwable error) {
+        OutputStream stderr = callbacks.getStderr();
+        if (stderr == null) {
+            return;
+        }
+        PrintWriter writer = new PrintWriter(new OutputStreamWriter(stderr, StandardCharsets.UTF_8), true);
+        writer.println("[MongoBleed] " + message);
+        if (error != null) {
+            error.printStackTrace(writer);
+        }
+        writer.flush();
+    }
+
     private final class ScanWorker extends SwingWorker<ScanResult, ScanProgress> implements MongobleedScanner.ScanProgressListener {
         private final ScanConfig config;
+        private final TempLeakStore store;
         private final AtomicBoolean stopRequested = new AtomicBoolean(false);
 
-        private ScanWorker(ScanConfig config) {
+        private ScanWorker(ScanConfig config, TempLeakStore store) {
             this.config = config;
+            this.store = store;
         }
 
         @Override
         protected ScanResult doInBackground() {
-            return scanner.scan(config, this);
+            return scanner.scan(config, this, new MongobleedScanner.LeakSink() {
+                @Override
+                public LeakItem persist(int offset, byte[] leak) throws IOException {
+                    long recordOffset = store.append(leak);
+                    return new LeakItem(offset, leak.length, FormatUtils.preview(leak, 120), recordOffset);
+                }
+            });
         }
 
         @Override
@@ -462,8 +661,10 @@ public class MongobleedTab {
                 result = get();
             } catch (Exception ex) {
                 statusLabel.setText("Scan failed: " + ex.getMessage());
+                logError("Scan failed", ex);
                 runButton.setEnabled(true);
                 stopButton.setEnabled(false);
+                clearButton.setEnabled(true);
                 currentWorker.set(null);
                 return;
             }
@@ -488,12 +689,20 @@ public class MongobleedTab {
 
             runButton.setEnabled(true);
             stopButton.setEnabled(false);
+            clearButton.setEnabled(true);
+            copyButton.setEnabled(!result.getLeaks().isEmpty());
+            downloadButton.setEnabled(!result.getLeaks().isEmpty());
             currentWorker.set(null);
         }
 
         @Override
         public void onProgress(int offset, int maxOffset, int probes, int leaksFound, int totalBytes) {
             publish(new ScanProgress(offset, probes, leaksFound, totalBytes));
+        }
+
+        @Override
+        public void onError(String message, Exception error) {
+            logError(message, error);
         }
 
         @Override
@@ -533,6 +742,10 @@ public class MongobleedTab {
             return leaks.get(row);
         }
 
+        public List<LeakItem> getLeaks() {
+            return new ArrayList<>(leaks);
+        }
+
         @Override
         public int getRowCount() {
             return leaks.size();
@@ -557,7 +770,7 @@ public class MongobleedTab {
                 case 1:
                     return item.getLength();
                 case 2:
-                    return FormatUtils.preview(item.getData(), 120);
+                    return item.getPreview();
                 default:
                     return "";
             }

