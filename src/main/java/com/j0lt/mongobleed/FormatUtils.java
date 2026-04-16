@@ -34,7 +34,7 @@ public final class FormatUtils {
         int offset = 0;
         while (offset < data.length) {
             int lineLen = Math.min(width, data.length - offset);
-            sb.append(String.format("%04x  ", offset));
+            sb.append(String.format("%08x  ", offset));
             for (int i = 0; i < width; i++) {
                 if (i < lineLen) {
                     sb.append(String.format("%02x ", data[offset + i] & 0xFF));
@@ -61,7 +61,10 @@ public final class FormatUtils {
         StringBuilder sb = new StringBuilder(text.length());
         for (int i = 0; i < text.length(); i++) {
             char c = text.charAt(i);
-            if (c >= 32 && c != 127) {
+            // Preserve common whitespace so the text view retains line/tab structure
+            if (c == '\n' || c == '\r' || c == '\t') {
+                sb.append(c);
+            } else if (c >= 32 && c != 127) {
                 sb.append(c);
             } else {
                 sb.append('.');

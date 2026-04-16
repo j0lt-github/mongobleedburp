@@ -41,12 +41,15 @@ public final class TempLeakStore implements Closeable {
         }
     }
 
+    /** Maximum single record size (16 MB). Prevents OOM from corrupt records. */
+    private static final int MAX_RECORD_BYTES = 16 * 1024 * 1024;
+
     public byte[] read(long recordOffset) throws IOException {
         synchronized (lock) {
             ensureOpen();
             file.seek(recordOffset);
             int length = file.readInt();
-            if (length < 0) {
+            if (length < 0 || length > MAX_RECORD_BYTES) {
                 throw new IOException("Corrupt leak record length: " + length);
             }
             byte[] data = new byte[length];

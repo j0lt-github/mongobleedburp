@@ -38,6 +38,9 @@ import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -65,6 +68,7 @@ public class MongobleedTab {
     private JTextField portField;
     private JTextField minOffsetField;
     private JTextField maxOffsetField;
+    private JTextField stepField;
 
     private JButton runButton;
     private JButton stopButton;
@@ -167,10 +171,12 @@ public class MongobleedTab {
 
         minOffsetField = new JTextField("20", 6);
         maxOffsetField = new JTextField("8192", 6);
+        stepField = new JTextField(String.valueOf(DEFAULT_STEP), 6);
 
         GridBagConstraints gbc = fieldConstraints();
         addFieldRow(panel, gbc, "Min", minOffsetField);
         addFieldRow(panel, gbc, "Max", maxOffsetField);
+        addFieldRow(panel, gbc, "Step", stepField);
 
         return panel;
     }
@@ -402,12 +408,18 @@ public class MongobleedTab {
         }
 
         List<LeakItem> leaks = tableModel.getLeaks();
+        String timestamp = ZonedDateTime.now(ZoneOffset.UTC)
+                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'"));
         try (BufferedWriter writer = Files.newBufferedWriter(destination.toPath(), StandardCharsets.UTF_8)) {
             writer.write("MongoBleed Detector Output");
+            writer.newLine();
+            writer.write("Timestamp: " + timestamp);
             writer.newLine();
             writer.write("Target: " + hostField.getText().trim() + ":" + portField.getText().trim());
             writer.newLine();
             writer.write("Offsets: " + minOffsetField.getText().trim() + "-" + maxOffsetField.getText().trim());
+            writer.newLine();
+            writer.write("Step: " + stepField.getText().trim());
             writer.newLine();
             writer.write("Fragments: " + leaks.size());
             writer.newLine();
@@ -537,7 +549,7 @@ public class MongobleedTab {
         }
         int minOffset = parseInt(minOffsetField, "min offset", 1);
         int maxOffset = parseInt(maxOffsetField, "max offset", minOffset + 1);
-        int step = DEFAULT_STEP;
+        int step = parseInt(stepField, "step", 1);
         int bufferPad = DEFAULT_BUFFER_PAD;
         int timeout = DEFAULT_TIMEOUT_MS;
         int maxProbes = DEFAULT_MAX_PROBES;

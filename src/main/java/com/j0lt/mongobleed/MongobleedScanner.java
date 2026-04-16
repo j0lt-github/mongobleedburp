@@ -12,7 +12,8 @@ import java.util.Set;
 public class MongobleedScanner {
     private static final String[] KEYWORDS = new String[] {
             "password", "secret", "key", "token", "admin", "akia",
-            "ssh", "private key", "begin rsa", "begin openssh"
+            "ssh", "private key", "begin rsa", "begin openssh",
+            "bearer", "authorization", "credentials", "access_key", "api_secret"
     };
     private static final int MAX_PROBE_ERROR_LOGS = 3;
 
