@@ -1,6 +1,7 @@
 package com.j0lt.mongobleed;
 
 import burp.IBurpExtenderCallbacks;
+import burp.ITextEditor;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
@@ -84,7 +85,7 @@ public class MongobleedTab {
     private LeakTableModel tableModel;
     private JTable leakTable;
     private JTextArea hexArea;
-    private JTextArea textArea;
+    private ITextEditor burpTextEditor;
     private JTextField filterField;
 
     private final AtomicReference<ScanWorker> currentWorker = new AtomicReference<>();
@@ -264,13 +265,12 @@ public class MongobleedTab {
         hexArea = new JTextArea();
         hexArea.setEditable(false);
         hexArea.setFont(monoFont);
-        textArea = new JTextArea();
-        textArea.setEditable(false);
-        textArea.setFont(monoFont);
+        burpTextEditor = callbacks.createTextEditor();
+        burpTextEditor.setEditable(false);
 
         JTabbedPane detailsTabs = new JTabbedPane();
         detailsTabs.addTab("Hex + ASCII", new JScrollPane(hexArea));
-        detailsTabs.addTab("Text", new JScrollPane(textArea));
+        detailsTabs.addTab("Text", burpTextEditor.getComponent());
 
         JSplitPane resultsSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT);
         resultsSplit.setResizeWeight(0.6);
@@ -359,7 +359,7 @@ public class MongobleedTab {
     private void clearResults(boolean clearStore) {
         tableModel.setLeaks(new ArrayList<LeakItem>());
         hexArea.setText("");
-        textArea.setText("");
+        burpTextEditor.setText(new byte[0]);
         summaryLabel.setText("Idle");
         keywordLabel.setText("Keywords: none");
         statusLabel.setText("Ready");
@@ -407,72 +407,96 @@ public class MongobleedTab {
             return;
         }
 
-        List<LeakItem> leaks = tableModel.getLeaks();
-        String timestamp = ZonedDateTime.now(ZoneOffset.UTC)
+        // Snapshot the leak list and UI fields on the EDT before handing off to the worker.
+        final List<LeakItem> leaks = tableModel.getLeaks();
+        final String timestamp = ZonedDateTime.now(ZoneOffset.UTC)
                 .format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'"));
-        try (BufferedWriter writer = Files.newBufferedWriter(destination.toPath(), StandardCharsets.UTF_8)) {
-            writer.write("MongoBleed Detector Output");
-            writer.newLine();
-            writer.write("Timestamp: " + timestamp);
-            writer.newLine();
-            writer.write("Target: " + hostField.getText().trim() + ":" + portField.getText().trim());
-            writer.newLine();
-            writer.write("Offsets: " + minOffsetField.getText().trim() + "-" + maxOffsetField.getText().trim());
-            writer.newLine();
-            writer.write("Step: " + stepField.getText().trim());
-            writer.newLine();
-            writer.write("Fragments: " + leaks.size());
-            writer.newLine();
-            writer.newLine();
+        final String target = hostField.getText().trim() + ":" + portField.getText().trim();
+        final String offsets = minOffsetField.getText().trim() + "-" + maxOffsetField.getText().trim();
+        final String step = stepField.getText().trim();
 
-            for (int i = 0; i < leaks.size(); i++) {
-                LeakItem leak = leaks.get(i);
-                byte[] data = readLeakBytes(leak, false);
-                if (data == null) {
-                    continue;
+        downloadButton.setEnabled(false);
+        statusLabel.setText("Exporting...");
+
+        new SwingWorker<Void, Void>() {
+            private IOException exportError;
+
+            @Override
+            protected Void doInBackground() {
+                try (BufferedWriter writer = Files.newBufferedWriter(destination.toPath(), StandardCharsets.UTF_8)) {
+                    writer.write("MongoBleed Detector Output");
+                    writer.newLine();
+                    writer.write("Timestamp: " + timestamp);
+                    writer.newLine();
+                    writer.write("Target: " + target);
+                    writer.newLine();
+                    writer.write("Offsets: " + offsets);
+                    writer.newLine();
+                    writer.write("Step: " + step);
+                    writer.newLine();
+                    writer.write("Fragments: " + leaks.size());
+                    writer.newLine();
+                    writer.newLine();
+
+                    for (int i = 0; i < leaks.size(); i++) {
+                        LeakItem leak = leaks.get(i);
+                        byte[] data = readLeakBytes(leak, false);
+                        if (data == null) {
+                            continue;
+                        }
+                        writer.write(String.format(Locale.ROOT, "Leak #%d", i + 1));
+                        writer.newLine();
+                        writer.write("Offset: " + leak.getOffset());
+                        writer.newLine();
+                        writer.write("Length: " + leak.getLength());
+                        writer.newLine();
+                        writer.write("Preview: " + leak.getPreview());
+                        writer.newLine();
+                        writer.write("Text:");
+                        writer.newLine();
+                        writer.write(FormatUtils.safeUtf8(data));
+                        writer.newLine();
+                        writer.write("Hex:");
+                        writer.newLine();
+                        writer.write(FormatUtils.hexAsciiDump(data, 16));
+                        writer.newLine();
+                    }
+                } catch (IOException e) {
+                    exportError = e;
                 }
-                writer.write(String.format(Locale.ROOT, "Leak #%d", i + 1));
-                writer.newLine();
-                writer.write("Offset: " + leak.getOffset());
-                writer.newLine();
-                writer.write("Length: " + leak.getLength());
-                writer.newLine();
-                writer.write("Preview: " + leak.getPreview());
-                writer.newLine();
-                writer.write("Text:");
-                writer.newLine();
-                writer.write(FormatUtils.safeUtf8(data));
-                writer.newLine();
-                writer.write("Hex:");
-                writer.newLine();
-                writer.write(FormatUtils.hexAsciiDump(data, 16));
-                writer.newLine();
+                return null;
             }
-        } catch (IOException e) {
-            logError("Failed to export output file", e);
-            JOptionPane.showMessageDialog(root, "Could not export output file.", "Export Error", JOptionPane.ERROR_MESSAGE);
-            return;
-        }
 
-        int failures = readErrorCount.get();
-        if (failures > 0) {
-            statusLabel.setText("Exported with " + failures + " read failures");
-            JOptionPane.showMessageDialog(
-                    root,
-                    "Export completed with " + failures + " leak record read failures. Check Burp extension errors for details.",
-                    "Partial Export",
-                    JOptionPane.WARNING_MESSAGE
-            );
-        } else {
-            statusLabel.setText("Exported output to " + destination.getName());
-        }
+            @Override
+            protected void done() {
+                downloadButton.setEnabled(true);
+                if (exportError != null) {
+                    logError("Failed to export output file", exportError);
+                    JOptionPane.showMessageDialog(root, "Could not export output file.", "Export Error", JOptionPane.ERROR_MESSAGE);
+                    statusLabel.setText("Export failed");
+                    return;
+                }
+                int failures = readErrorCount.get();
+                if (failures > 0) {
+                    statusLabel.setText("Exported with " + failures + " read failures");
+                    JOptionPane.showMessageDialog(
+                            root,
+                            "Export completed with " + failures + " leak record read failures. Check Burp extension errors for details.",
+                            "Partial Export",
+                            JOptionPane.WARNING_MESSAGE
+                    );
+                } else {
+                    statusLabel.setText("Exported output to " + destination.getName());
+                }
+            }
+        }.execute();
     }
 
     private void updateDetails() {
         int row = leakTable.getSelectedRow();
         if (row < 0) {
             hexArea.setText("");
-            textArea.setText("");
+            burpTextEditor.setText(new byte[0]);
             return;
         }
         int modelRow = leakTable.convertRowIndexToModel(row);
@@ -480,11 +504,11 @@ public class MongobleedTab {
         byte[] data = readLeakBytes(item, true);
         if (data == null) {
             hexArea.setText("");
-            textArea.setText("");
+            burpTextEditor.setText(new byte[0]);
             return;
         }
         hexArea.setText(FormatUtils.hexAsciiDump(data, 16));
-        textArea.setText(FormatUtils.safeUtf8(data));
+        burpTextEditor.setText(data);
     }
 
     private byte[] readLeakBytes(LeakItem item, boolean showDialogOnFailure) {
