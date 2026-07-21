@@ -1,0 +1,13 @@
+Uuid: f1ae6441975240d2b27a90e96664fb2e
+ExtensionType: 1
+Name: MongoBleed Detector
+RepoName: mongobleed-detector
+ScreenVersion: 1.0.0
+SerialVersion: 1
+MinPlatformVersion: 2
+ProOnly: False
+Author: j0lt
+ShortDescription: Detects CVE-2025-14847 (MongoBleed) via manual leak tests.
+EntryPoint: mongobleed-burp-1.1.0.jar
+BuildCommand: ./gradlew build
+SupportedProducts: Pro, Community
