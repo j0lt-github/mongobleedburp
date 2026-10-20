@@ -1,0 +1,22 @@
+<p>This extension detects CVE-2025-14847 (MongoBleed), a memory leak vulnerability in MongoDB, by running manual connection tests directly from a dedicated UI tab. It connects to a specified host and port, captures leaked memory data across a configurable byte offset range, and displays the results for inspection.</p>
+
+<h2>Features</h2>
+<ul>
+  <li>Dedicated UI tab for manually configuring host, port, and minimum/maximum byte offsets before running a scan</li>
+  <li>Scan output is written to a temporary file rather than heap memory, enabling handling of large leak results</li>
+  <li>Results are displayed in both a hex + ASCII view and a plain text view for flexible inspection</li>
+  <li>Keyword highlighting automatically marks common secret patterns within the leaked output</li>
+  <li>Download Output button exports the full scan results as a <code class=InlineCode>.txt</code> file</li>
+  <li>Each new scan rotates to a fresh temporary file and discards the previous one, keeping resource usage bounded</li>
+</ul>
+
+<h2>Usage</h2>
+<ol>
+  <li>Navigate to the MongoBleed tab that appears after loading the extension.</li>
+  <li>Enter the target <code class=InlineCode>Host</code> and <code class=InlineCode>Port</code> of the MongoDB instance to test.</li>
+  <li>Set the minimum and maximum byte offsets to define the memory range to probe.</li>
+  <li>Click <strong>Run Scan</strong> to initiate the connection and capture leaked memory data.</li>
+  <li>Review the returned data in the Results table, switching between the Hex/ASCII view and the Text view as needed.</li>
+  <li>Check highlighted entries to quickly identify potential secrets or sensitive patterns in the output.</li>
+  <li>Click <strong>Download Output</strong> to save the full results as a <code class=InlineCode>.txt</code> report to a location of your choice.</li>
+</ol>
